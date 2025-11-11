@@ -1,0 +1,48 @@
+# Build artifacts
+/build/
+/install/
+/devel/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Binaries
+*.o
+*.a
+*.so
+*.out
+*.exe
+*.elf
+tmc_driver
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.user
+*.workspace
+*.code-workspace
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.old
+
+# System-specific files
+.DS_Store
+Thumbs.db
+
+# Python or scripting leftovers
+__pycache__/
+*.pyc
+
+# Submodule metadata
+.gitmodules~
+
+# Ignore everything under third_party except submodules
+/third_party/*/*
+!/third_party/TMC-API/
+
