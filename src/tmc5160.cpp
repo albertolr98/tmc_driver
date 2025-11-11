@@ -7,12 +7,16 @@ extern "C" {
     #include "tmc/ic/TMC5160/TMC5160_HW_Abstraction.h"
 }
 
+#include <atomic>
 #include <gpiod.h>
 #include <iostream>
 #include <mutex>
 #include <unordered_map>
 
 namespace {
+
+std::atomic<uint16_t> nextIcID{0};
+
 class CSPinRegistry {
 public:
     void registerPin(uint16_t icID, unsigned int pin)
@@ -66,7 +70,7 @@ bool TMC5160::enableDriver(bool state)
     return true;
 }
 TMC5160::TMC5160(unsigned int cs_gpio, unsigned int en_gpio)
-    : cs_pin_(cs_gpio), en_pin_(en_gpio) {}
+    : icID_(nextIcID++), cs_pin_(cs_gpio), en_pin_(en_gpio) {}
 
 bool TMC5160::init()
 {
