@@ -5,9 +5,11 @@
 #include <linux/spi/spidev.h>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
 
 int SPIBus::fd_ = -1;
 std::mutex SPIBus::mtx_;
+bool SPIBus::logEnabled_ = false;
 
 bool SPIBus::init(const char* device, uint32_t speed)
 {
@@ -24,6 +26,11 @@ bool SPIBus::init(const char* device, uint32_t speed)
     if (ioctl(fd_, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) return false;
 
     return true;
+}
+
+void SPIBus::enableLogging(bool enable)
+{
+    logEnabled_ = enable;
 }
 
 void SPIBus::close()
@@ -54,12 +61,27 @@ bool SPIBus::transfer(uint8_t* data, size_t len, unsigned int cs_pin)
     tr.len = len;
 
     std::lock_guard<std::mutex> lock(mtx_);
+    if (logEnabled_) {
+        std::cerr << "[SPI] CS=" << cs_pin << " tx:";
+        for (size_t i = 0; i < len; ++i) {
+            std::cerr << ' ' << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+                      << static_cast<int>(data[i]);
+        }
+        std::cerr << std::dec << std::endl;
+    }
     gpiod_line_set_value(cs, 0);
-    ioctl(fd_, SPI_IOC_MESSAGE(1), &tr);
+    int ret = ioctl(fd_, SPI_IOC_MESSAGE(1), &tr);
     gpiod_line_set_value(cs, 1);
+    if (logEnabled_) {
+        std::cerr << "[SPI] CS=" << cs_pin << " rx:";
+        for (size_t i = 0; i < len; ++i) {
+            std::cerr << ' ' << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+                      << static_cast<int>(data[i]);
+        }
+        std::cerr << std::dec << " (ret=" << ret << ')' << std::endl;
+    }
 
     gpiod_line_release(cs);
     gpiod_chip_close(chip);
     return true;
 }
-

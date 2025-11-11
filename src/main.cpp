@@ -22,7 +22,7 @@ static bool runCommsProbe(TMC5160& driver, const char* label)
     const uint32_t echoed = tmc5160_readRegister(id, TMC5160_VMAX);
     tmc5160_writeRegister(id, TMC5160_VMAX, originalVmax);
 
-    const bool versionOk = (version == 0x21);
+    const bool versionOk = (version == 0x21 || version == 0x30);
     const bool vmaxEchoOk = (echoed == testVmax);
 
     std::printf("[%s] GCONF=0x%08X | INP_OUT=0x%08X (version 0x%02X) | VMAX echo %s\n",
