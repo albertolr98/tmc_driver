@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>tmc_driver</name>
+  <version>0.1.0</version>
+  <description>Driver for TMC5160 motor drivers (native C++ project). Optional ROS 2 packaging metadata.</description>
+  <maintainer email="alberto.lopezro@alumnos.upm.es">Alberto López Rodríguez</maintainer>
+  <license>MIT</license>
+
+  <!-- Buildtool required for ROS 2 packages -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- No mandatory ROS runtime deps yet; add rclcpp or other packages if you wrap this with ROS nodes -->
+  <!-- Example: <depend>rclcpp</depend> -->
+
+  <export>
+    <!-- ament index metadata could go here -->
+  </export>
+</package>

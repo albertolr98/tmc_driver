@@ -27,3 +27,13 @@ if (NOT GPIOD_LIB)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${GPIOD_LIB})
+
+# Optional ROS 2 / ament_cmake integration.
+# If ament_cmake is available (e.g. building with colcon), export includes and call ament_package().
+find_package(ament_cmake QUIET)
+if(ament_cmake_FOUND)
+  ament_export_include_directories(include)
+  install(TARGETS ${PROJECT_NAME}
+          RUNTIME DESTINATION lib/${PROJECT_NAME})
+  ament_package()
+endif()
