@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #include <atomic>
+#include <cstdio>
 #include <gpiod.h>
 #include <iostream>
 #include <mutex>
@@ -97,6 +98,31 @@ float TMC5160::readPosition(int motor_id)
     int32_t pos = 0;
     pos = tmc5160_readRegister(icID_, TMC5160_XACTUAL);
     return static_cast<float>(pos);
+}
+
+bool TMC5160::checkComms(const char* label)
+{
+    const char* tag = label ? label : "TMC5160";
+    const uint32_t gconf = tmc5160_readRegister(icID_, TMC5160_GCONF);
+    const uint32_t inpOut = tmc5160_readRegister(icID_, TMC5160_INP_OUT);
+    const uint32_t version = (inpOut & TMC5160_VERSION_MASK) >> TMC5160_VERSION_SHIFT;
+
+    const uint32_t originalVmax = tmc5160_readRegister(icID_, TMC5160_VMAX);
+    const uint32_t testVmax = 0x000A000; // pequeño valor de prueba dentro del rango
+    tmc5160_writeRegister(icID_, TMC5160_VMAX, testVmax);
+    const uint32_t echoed = tmc5160_readRegister(icID_, TMC5160_VMAX);
+    tmc5160_writeRegister(icID_, TMC5160_VMAX, originalVmax);
+
+    const bool versionOk = (version == 0x30);
+    const bool vmaxEchoOk = (echoed == testVmax);
+
+    std::printf("[%s] GCONF=0x%08X | INP_OUT=0x%08X (version 0x%02X) | VMAX echo %s\n",
+                tag, gconf, inpOut, version, vmaxEchoOk ? "OK" : "FAIL");
+    if (!versionOk) {
+        std::printf("  -> Firma esperada 0x30, recibido 0x%02X\n", version);
+    }
+
+    return versionOk && vmaxEchoOk;
 }
 
 
