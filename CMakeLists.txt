@@ -13,7 +13,7 @@ include_directories(
   third_party/TMC-API/tmc/ic/TMC5160
 )
 
-file(GLOB SRC src/*.cpp)
+file(GLOB SRC CONFIGURE_DEPENDS src/*.cpp)
 set(TMC_API_SOURCES
   third_party/TMC-API/tmc/ic/TMC5160/TMC5160.c
 )
