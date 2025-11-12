@@ -36,6 +36,17 @@ int main()
         const bool ok = drv->checkComms(label);
         std::printf("[%s] Resultado comunicación: %s\n", label, ok ? "OK" : "FALLO");
     }
+    uint8_t pos;
+
+    for (auto& [label, drv] : drivers) {
+        pos = drv->readPosition(0);
+        std::printf("[%s] Posición leída: %d\n", label, pos);
+    }
+
+    for (auto& [label, drv] : drivers) {
+        drv->setSpeed(0, 70.0f);  // 70 RPM
+        std::printf("[%s] Velocidad establecida a 70 RPM\n", label);
+    }
 
     SPIBus::close();
     return 0;

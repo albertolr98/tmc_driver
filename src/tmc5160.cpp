@@ -44,6 +44,30 @@ bool TMC5160::init()
         return false;
     }
     tmc::registerCSPin(icID_, cs_pin_);
+    // Inicializar la caché de la TMC-API y aplicar la configuración por defecto
+    // (reset, limpieza de flags y parámetros de rampa/motor) igual que la
+    // inicialización previa que compartiste.
+    tmc5160_initCache();
+
+    // Reset del driver y limpieza de flags de estado
+    tmc5160_writeRegister(icID_, TMC5160_GCONF, 0x00000000); // Reset a valores por defecto
+    tmc5160_writeRegister(icID_, TMC5160_GSTAT, 0x00000007); // Limpiar flags de estado
+
+    // Reconfigurar registros principales
+    tmc5160_writeRegister(icID_, TMC5160_GCONF, 0x00000004); // Enable StealthChop
+    tmc5160_writeRegister(icID_, TMC5160_CHOPCONF, 0x00100C3);
+    tmc5160_writeRegister(icID_, TMC5160_IHOLD_IRUN, 0x00061403); // IHOLD=10, IRUN=31, IHOLDDELAY=6
+    tmc5160_writeRegister(icID_, TMC5160_TPOWERDOWN, 0x0000000A); // TPOWERDOWN=10
+    tmc5160_writeRegister(icID_, TMC5160_TPWMTHRS, 0x000001F4); // TPWM_THRS=500
+    tmc5160_writeRegister(icID_, TMC5160_A1, 500); // A1=500
+    tmc5160_writeRegister(icID_, TMC5160_V1, 5000); // V1=5000
+    tmc5160_writeRegister(icID_, TMC5160_AMAX, 500); // AMAX=500
+    tmc5160_writeRegister(icID_, TMC5160_DMAX, 700); // DMAX=700
+    tmc5160_writeRegister(icID_, TMC5160_D1, 1400); // D1=1400
+    tmc5160_writeRegister(icID_, TMC5160_VSTOP, 10); // VSTOP=10
+    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_VELPOS); // Velocity mode
+    tmc5160_writeRegister(icID_, TMC5160_VMAX, 0); // VMAX=0 (stop initially)
+
     std::cout << "TMC5160 iniciado (CS=" << cs_pin_ << ", EN=" << en_pin_ << ")\n";
     return true;
 }
