@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>tmc_driver</name>
+  <name>TMCDriver</name>
   <version>0.1.0</version>
   <description>Driver for TMC5160 motor drivers (native C++ project). Optional ROS 2 packaging metadata.</description>
   <maintainer email="alberto.lopezro@alumnos.upm.es">Alberto López Rodríguez</maintainer>
