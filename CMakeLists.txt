@@ -19,6 +19,7 @@ set(TMC_API_SOURCES
 )
 
 add_executable(${PROJECT_NAME} ${SRC} ${TMC_API_SOURCES})
+target_compile_definitions(${PROJECT_NAME} PRIVATE TMC5160_IC_CACHE_COUNT=4)
 
 find_library(GPIOD_LIB gpiod)
 if (NOT GPIOD_LIB)
