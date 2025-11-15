@@ -11,6 +11,7 @@ extern "C" {
 #include <cstdio>
 #include <gpiod.h>
 #include <iostream>
+#include <cmath>
 
 // Pin activo en bajo: EN=0 → habilitado
 bool TMC5160::enableDriver(bool state)
@@ -75,7 +76,19 @@ bool TMC5160::init()
 bool TMC5160::setSpeed(int motor_id, float rpm)
 {
     (void)motor_id;
-    int32_t vmax = static_cast<int32_t>(rpm * 100);
+    // Convert RPM to VMAX (microsteps per second) using motor and driver settings.
+    // Init config sets CHOPCONF with MRES=0 (native 256 microsteps), and motor is 1.8° => 200 steps/rev.
+    const unsigned steps_per_rev = 200; // 1.8° per step
+    const unsigned microsteps = 256;    // MRES=0 => native 256 µsteps/step in CHOPCONF used in init()
+    const float ticks_per_second = 1.0f; // VMAX unit = µsteps per second
+
+    const double microsteps_per_rev = static_cast<double>(steps_per_rev) * static_cast<double>(microsteps);
+    double vmax_d = (static_cast<double>(rpm) * microsteps_per_rev) / (static_cast<double>(ticks_per_second) * 60.0);
+    // clamp to allowed range
+    if (vmax_d > static_cast<double>(TMC5160_MAX_VELOCITY)) vmax_d = static_cast<double>(TMC5160_MAX_VELOCITY);
+    if (vmax_d < -static_cast<double>(TMC5160_MAX_VELOCITY)) vmax_d = -static_cast<double>(TMC5160_MAX_VELOCITY);
+
+    int32_t vmax = static_cast<int32_t>(std::lround(vmax_d));
     tmc5160_writeRegister(icID_, TMC5160_VMAX, vmax);
     return true;
 }
