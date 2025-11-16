@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -21,6 +22,7 @@ void handleSigint(int)
 
 void runHardcodedSquare(const std::array<std::pair<const char*, TMCDriver*>, 4>& drivers)
 {
+    constexpr float kRpmToRadPerSec = 6.28318530717958647692f / 60.0f;
     struct Segment {
         float drv2_rpm;
         float drv3_rpm;
@@ -40,11 +42,14 @@ void runHardcodedSquare(const std::array<std::pair<const char*, TMCDriver*>, 4>&
         for (const auto& segment : pattern) {
             if (g_shouldStop.load()) break;
 
-            drivers[1].second->setSpeed(0, segment.drv2_rpm);
-            drivers[2].second->setSpeed(0, segment.drv3_rpm);
-            drivers[3].second->setSpeed(0, segment.drv4_rpm);
-            std::printf("%s | v2=%.1f rpm, v3=%.1f rpm, v4=%.1f rpm\n",
-                        segment.description, segment.drv2_rpm, segment.drv3_rpm, segment.drv4_rpm);
+            drivers[1].second->setSpeed(0, segment.drv2_rpm * kRpmToRadPerSec);
+            drivers[2].second->setSpeed(0, segment.drv3_rpm * kRpmToRadPerSec);
+            drivers[3].second->setSpeed(0, segment.drv4_rpm * kRpmToRadPerSec);
+            std::printf("%s | v2=%.1f rad/s, v3=%.1f rad/s, v4=%.1f rad/s\n",
+                        segment.description,
+                        segment.drv2_rpm * kRpmToRadPerSec,
+                        segment.drv3_rpm * kRpmToRadPerSec,
+                        segment.drv4_rpm * kRpmToRadPerSec);
 
             const auto start = std::chrono::steady_clock::now();
             while (!g_shouldStop.load()) {

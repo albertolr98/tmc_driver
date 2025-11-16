@@ -85,15 +85,15 @@ bool TMC5160::init()
     return true;
 }
 
-bool TMC5160::setSpeed(int motor_id, float rpm)
+bool TMC5160::setSpeed(int motor_id, float rad_per_sec)
 {
     (void)motor_id;
-    // Convert RPM to VMAX (microsteps per second) using motor and driver settings.
+    // Convert rad/s to VMAX (microsteps per second) using motor and driver settings.
     // VMAX units are µsteps/t where t = 2^24 / fCLK. Multiply desired µsteps/s by t to match register units.
 
-    const bool negative_dir = rpm < 0.0f;
+    const bool negative_dir = rad_per_sec < 0.0f;
     const double microsteps_per_second =
-      (std::fabs(static_cast<double>(rpm)) * kMicrostepsPerRev) / 60.0;
+      std::fabs(static_cast<double>(rad_per_sec)) / kMicrostepToRad;
     double vmax_d = microsteps_per_second * kVelocityTimeUnit;
     // clamp to allowed range (register expects positive magnitude)
     if (vmax_d > static_cast<double>(TMC5160_MAX_VELOCITY)) vmax_d = static_cast<double>(TMC5160_MAX_VELOCITY);
