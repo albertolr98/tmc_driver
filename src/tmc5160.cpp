@@ -80,10 +80,13 @@ bool TMC5160::setSpeed(int motor_id, float rpm)
     // Init config sets CHOPCONF with MRES=0 (native 256 microsteps), and motor is 1.8° => 200 steps/rev.
     const unsigned steps_per_rev = 200; // 1.8° per step
     const unsigned microsteps = 256;    // MRES=0 => native 256 µsteps/step in CHOPCONF used in init()
-    const float ticks_per_second = 1.0f; // VMAX unit = µsteps per second
+    constexpr double tmc5160_clock_hz = 12'000'000.0; // Datasheet: internal clock fCLK = 12 MHz
+    constexpr double velocity_time_unit = static_cast<double>(1u << 24) / tmc5160_clock_hz;
+    // VMAX units are µsteps/t where t = 2^24 / fCLK. Multiply desired µsteps/s by t to match register units.
 
     const double microsteps_per_rev = static_cast<double>(steps_per_rev) * static_cast<double>(microsteps);
-    double vmax_d = (static_cast<double>(rpm) * microsteps_per_rev) / (static_cast<double>(ticks_per_second) * 60.0);
+    const double microsteps_per_second = (static_cast<double>(rpm) * microsteps_per_rev) / 60.0;
+    double vmax_d = microsteps_per_second * velocity_time_unit;
     // clamp to allowed range
     if (vmax_d > static_cast<double>(TMC5160_MAX_VELOCITY)) vmax_d = static_cast<double>(TMC5160_MAX_VELOCITY);
     if (vmax_d < -static_cast<double>(TMC5160_MAX_VELOCITY)) vmax_d = -static_cast<double>(TMC5160_MAX_VELOCITY);

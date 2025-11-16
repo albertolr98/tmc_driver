@@ -44,8 +44,8 @@ int main()
     }
 
     for (auto& [label, drv] : drivers) {
-        drv->setSpeed(0, 70.0f);  // 70 RPM
-        std::printf("[%s] Velocidad establecida a 70 RPM\n", label);
+        drv->setSpeed(0, 30.0f);  // 30 RPM
+        std::printf("[%s] Velocidad establecida a 30 RPM\n", label);
     }
 
     SPIBus::close();
