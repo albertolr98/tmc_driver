@@ -78,8 +78,9 @@ bool TMC5160::init()
     tmc5160_writeRegister(icID_, TMC5160_DMAX, 700); // DMAX=700
     tmc5160_writeRegister(icID_, TMC5160_D1, 1400); // D1=1400
     tmc5160_writeRegister(icID_, TMC5160_VSTOP, 10); // VSTOP=10
-    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_VELPOS); // Velocity mode
-    tmc5160_writeRegister(icID_, TMC5160_VMAX, 0); // VMAX=0 (stop initially)
+    // Detén cualquier movimiento previo y deja VMAX a 0 antes de aceptar comandos.
+    tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
+    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
 
     std::cout << "TMC5160 iniciado (CS=" << cs_pin_ << ", EN=" << en_pin_ << ")\n";
     return true;
