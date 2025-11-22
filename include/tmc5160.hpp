@@ -18,4 +18,5 @@ private:
     unsigned int cs_pin_;
     unsigned int en_pin_;
     bool enableDriver(bool state);
+    void forceStandstill();
 };

@@ -103,10 +103,30 @@ int main()
         std::printf("[%s] Posición leída: %.2f\n", label, pos);
     }
 
-    runHardcodedSquare(drivers);
+    //runHardcodedSquare(drivers);
+
+    for (auto& [label, drv] : drivers) {
+        drv->setSpeed(0, -2*3.14159); // 1 vuelta por segundo
+    }
+
+    // Esperar hasta recibir SIGINT
+    while (!g_shouldStop.load()) {
+        std::printf("Posiciones motores: %.2f, %.2f, %.2f, %.2f rad\n",
+                    drv1.readPosition(0),
+                    drv2.readPosition(0),
+                    drv3.readPosition(0),
+                    drv4.readPosition(0));
+        std::printf("Velocidades motores: %.2f, %.2f, %.2f, %.2f rad/s\n",
+                    drv1.readSpeed(0),
+                    drv2.readSpeed(0),
+                    drv3.readSpeed(0),
+                    drv4.readSpeed(0));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
 
     for (auto& [label, drv] : drivers) {
         drv->setSpeed(0, 0.0f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         drv->shutdown();
         std::printf("[%s] Driver deshabilitado\n", label);
     }

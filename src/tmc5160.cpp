@@ -10,8 +10,10 @@ extern "C" {
 
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 #include <gpiod.h>
 #include <iostream>
+#include <thread>
 
 namespace
 {
@@ -72,12 +74,15 @@ bool TMC5160::init()
     tmc5160_writeRegister(icID_, TMC5160_IHOLD_IRUN, 0x00061004);      // IHOLD=4 (~0.44A), IRUN=16 (~1.6A), IHOLDDELAY=6
     tmc5160_writeRegister(icID_, TMC5160_TPOWERDOWN, 0x0000000A);      // 10 * 2^18 clock cycles
     tmc5160_writeRegister(icID_, TMC5160_TPWMTHRS, 0x000001F4);        // TPWM_THRS=500
+    tmc5160_writeRegister(icID_, TMC5160_VSTART, 0); // VSTART=0 para arrancar siempre desde reposo
     tmc5160_writeRegister(icID_, TMC5160_A1, 500); // A1=500
     tmc5160_writeRegister(icID_, TMC5160_V1, 5000); // V1=5000
     tmc5160_writeRegister(icID_, TMC5160_AMAX, 500); // AMAX=500
     tmc5160_writeRegister(icID_, TMC5160_DMAX, 700); // DMAX=700
     tmc5160_writeRegister(icID_, TMC5160_D1, 1400); // D1=1400
     tmc5160_writeRegister(icID_, TMC5160_VSTOP, 10); // VSTOP=10
+    tmc5160_writeRegister(icID_, TMC5160_XACTUAL, 0); // XACTUAL=0
+
     // Detén cualquier movimiento previo y deja VMAX a 0 antes de aceptar comandos.
     tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
     tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
@@ -121,7 +126,10 @@ float TMC5160::readPosition(int motor_id)
 float TMC5160::readSpeed(int motor_id)
 {
     (void)motor_id;
-    const int32_t vel = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
+    // VACTUAL is a 24-bit signed value in the lower bits of a 32-bit register
+    const uint32_t raw = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
+    // Sign-extend from 24-bit to 32-bit
+    const int32_t vel = (raw & 0x800000) ? (raw | 0xFF000000) : (raw & 0x00FFFFFF);
     const double microsteps_per_second = static_cast<double>(vel) / kVelocityTimeUnit;
     const double rad_per_second = microsteps_per_second * kMicrostepToRad;
     return static_cast<float>(rad_per_second);
@@ -154,11 +162,49 @@ bool TMC5160::checkComms(const char* label)
 
 void TMC5160::shutdown()
 {
-    // Ensure motion stops before disabling outputs.
+    // Ensure motion stops before disabling outputs (force ramp to 0).
+    forceStandstill();
     tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
     tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
     enableDriver(false);
     std::cout << "TMC5160 detenido (CS=" << cs_pin_ << ", EN=" << en_pin_ << ")\n";
+}
+
+void TMC5160::forceStandstill()
+{
+    // Lleva el generador de rampa a velocidad 0 usando la rampa (no solo HOLD) para borrar cualquier
+    // velocidad latente que quedase en el chip tras ejecuciones previas. Usa una deceleración alta
+    // temporalmente para vaciar rápido el ramp generator.
+    const uint32_t dmax_original = tmc5160_readRegister(icID_, TMC5160_DMAX);
+    const uint32_t d1_original = tmc5160_readRegister(icID_, TMC5160_D1);
+    const uint32_t amax_original = tmc5160_readRegister(icID_, TMC5160_AMAX);
+
+    tmc5160_writeRegister(icID_, TMC5160_DMAX, TMC5160_MAX_ACCELERATION);
+    tmc5160_writeRegister(icID_, TMC5160_D1, TMC5160_MAX_ACCELERATION);
+    tmc5160_writeRegister(icID_, TMC5160_AMAX, TMC5160_MAX_ACCELERATION);
+
+    const uint32_t rawStart = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
+    const int32_t velStart = (rawStart & 0x800000) ? (rawStart | 0xFF000000) : (rawStart & 0x00FFFFFF);
+    const bool wasNegative = velStart < 0;
+
+    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, wasNegative ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
+    tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
+    tmc5160_writeRegister(icID_, TMC5160_XTARGET, tmc5160_readRegister(icID_, TMC5160_XACTUAL));
+
+    bool standstillReached = false;
+    constexpr int kMaxPolls = 150; // ~300 ms
+    for (int i = 0; i < kMaxPolls; ++i) {
+        const uint32_t rampstat = tmc5160_readRegister(icID_, TMC5160_RAMPSTAT);
+        if (rampstat & TMC5160_RS_VZERO) {
+            standstillReached = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
+    tmc5160_writeRegister(icID_, TMC5160_DMAX, dmax_original);
+    tmc5160_writeRegister(icID_, TMC5160_D1, d1_original);
+    tmc5160_writeRegister(icID_, TMC5160_AMAX, amax_original);
 }
 
 
