@@ -11,6 +11,7 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <chrono>
+#include <algorithm>
 #include <gpiod.h>
 #include <iostream>
 #include <thread>
@@ -25,6 +26,30 @@ constexpr double kMicrostepToRad = kTau / kMicrostepsPerRev;
 constexpr double kTmc5160ClockHz = 12'000'000.0;  // Datasheet fCLK
 constexpr double kVelocityTimeUnit =
   static_cast<double>(1u << 24) / kTmc5160ClockHz;  // µsteps/s -> register factor
+// Tiempo fijo de rampa: todas las ruedas llegan al objetivo en el mismo tiempo (más suave)
+constexpr double kRampTimeSeconds = 3.0;  // sube para suavizar aceleración
+// Escala de aceleración en unidades de registro (mismo factor que VMAX^2).
+constexpr double kAccelerationTimeUnit = kVelocityTimeUnit * kVelocityTimeUnit;
+constexpr double kMinAccelerationReg = 1.0;
+constexpr double kMaxAccelerationReg = static_cast<double>(TMC5160_MAX_ACCELERATION);
+
+double toMicrostepsPerSecond(double rad_per_sec)
+{
+    return std::fabs(rad_per_sec) / kMicrostepToRad;
+}
+
+double vactualToMicrostepsPerSecond(uint32_t raw_vactual)
+{
+    const int32_t vel = (raw_vactual & 0x800000) ? (raw_vactual | 0xFF000000) : (raw_vactual & 0x00FFFFFF);
+    return static_cast<double>(vel) / kVelocityTimeUnit;
+}
+
+uint32_t accelToRegister(double microsteps_per_second2)
+{
+    const double reg_value = microsteps_per_second2 * kAccelerationTimeUnit;
+    const double clamped = std::clamp(reg_value, kMinAccelerationReg, kMaxAccelerationReg);
+    return static_cast<uint32_t>(std::lround(clamped));
+}
 }  // namespace
 
 // Pin activo en bajo: EN=0 → habilitado
@@ -91,41 +116,85 @@ bool TMC5160::init()
     return true;
 }
 
-bool TMC5160::setSpeed(int motor_id, float rad_per_sec)
+bool TMC5160::setSpeed(float rad_per_sec)
 {
-    (void)motor_id;
-    // Convert rad/s to VMAX (microsteps per second) using motor and driver settings.
-    // VMAX units are µsteps/t where t = 2^24 / fCLK. Multiply desired µsteps/s by t to match register units.
 
-    const bool negative_dir = rad_per_sec < 0.0f;
-    const double microsteps_per_second =
-      std::fabs(static_cast<double>(rad_per_sec)) / kMicrostepToRad;
+    // 1. Determinamos la dirección y la magnitud
+    // Nota: Mantenemos siempre el modo velocidad (VELPOS o VELNEG).
+    // NUNCA usamos HOLD (3) para parar, porque HOLD mantiene la velocidad actual.
+    bool negative_dir = rad_per_sec < 0.0f;
+
+    const uint32_t raw_vactual = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
+    const double current_microsteps_per_second_signed = vactualToMicrostepsPerSecond(raw_vactual);
+    const double current_microsteps_per_second_abs = std::fabs(current_microsteps_per_second_signed);
+    const bool currentlyNegative = current_microsteps_per_second_signed < 0.0;
+
+    // 2. Caso de parada (velocidad cercana a 0)
+    if (std::fabs(rad_per_sec) < 1e-3f) {
+        // Si ya estamos parados, no hacemos nada
+        if (current_microsteps_per_second_abs < 1e-6) return true;
+
+        // Rampa de frenado calculada para llegar a 0 en kRampTimeSeconds
+        const uint32_t decel_reg = accelToRegister(current_microsteps_per_second_abs / kRampTimeSeconds);
+
+        tmc5160_writeRegister(icID_, TMC5160_AMAX, decel_reg);
+        tmc5160_writeRegister(icID_, TMC5160_DMAX, decel_reg);
+
+        tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, currentlyNegative ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
+        tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
+        
+        return true;
+    }
+
+    // 2b. Si la orden invierte el sentido y aún vamos rápido, primero frena suavemente a 0.
+    if ((currentlyNegative != negative_dir) && (current_microsteps_per_second_abs > 1e-3)) {
+        const uint32_t decel_reg = accelToRegister(current_microsteps_per_second_abs / kRampTimeSeconds);
+        tmc5160_writeRegister(icID_, TMC5160_AMAX, decel_reg);
+        tmc5160_writeRegister(icID_, TMC5160_DMAX, decel_reg);
+        tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, currentlyNegative ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
+        tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
+        return true;  // vuelve a llamar a setSpeed() en el siguiente ciclo con la nueva dirección
+    }
+
+    // 3. Caso de movimiento normal
+    const double microsteps_per_second = toMicrostepsPerSecond(rad_per_sec);
+    const uint32_t accel_reg = accelToRegister(microsteps_per_second / kRampTimeSeconds);
+
+    // Misma aceleración/dec para las tres ruedas → misma rampa temporal
+    tmc5160_writeRegister(icID_, TMC5160_AMAX, accel_reg);
+    tmc5160_writeRegister(icID_, TMC5160_DMAX, accel_reg);
+    // Segmento suave inicial: V1 a un tercio del objetivo y A1/D1 a ~1/3 de AMAX
+    const uint32_t a1_reg = std::max<uint32_t>(1u, accel_reg / 3u);
+    const uint32_t d1_reg = std::max<uint32_t>(1u, accel_reg / 3u);
+
     double vmax_d = microsteps_per_second * kVelocityTimeUnit;
-    // clamp to allowed range (register expects positive magnitude)
-    if (vmax_d > static_cast<double>(TMC5160_MAX_VELOCITY)) vmax_d = static_cast<double>(TMC5160_MAX_VELOCITY);
+    
+    if (vmax_d > static_cast<double>(TMC5160_MAX_VELOCITY)) 
+        vmax_d = static_cast<double>(TMC5160_MAX_VELOCITY);
 
     int32_t vmax = static_cast<int32_t>(std::lround(vmax_d));
-    uint8_t rampMode = TMC5160_MODE_HOLD;
-    if (vmax > 0) {
-        rampMode = negative_dir ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS;
-    }
+    const uint32_t v1_reg = static_cast<uint32_t>(std::max(1.0, vmax_d / 3.0));
+
+    // CORRECCIÓN: incluso si vmax es 0 por redondeo, forzamos VELPOS/VELNEG (no HOLD).
+    uint8_t rampMode = negative_dir ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS;
 
     tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, rampMode);
     tmc5160_writeRegister(icID_, TMC5160_VMAX, vmax);
+    tmc5160_writeRegister(icID_, TMC5160_V1, v1_reg);
+    tmc5160_writeRegister(icID_, TMC5160_A1, a1_reg);
+    tmc5160_writeRegister(icID_, TMC5160_D1, d1_reg);
     return true;
 }
 
-float TMC5160::readPosition(int motor_id)
+float TMC5160::readPosition()
 {
-    (void)motor_id;
     const int32_t pos = tmc5160_readRegister(icID_, TMC5160_XACTUAL);
     const double radians = static_cast<double>(pos) * kMicrostepToRad;
     return static_cast<float>(radians);
 }
 
-float TMC5160::readSpeed(int motor_id)
+float TMC5160::readSpeed()
 {
-    (void)motor_id;
     // VACTUAL is a 24-bit signed value in the lower bits of a 32-bit register
     const uint32_t raw = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
     // Sign-extend from 24-bit to 32-bit
@@ -162,50 +231,12 @@ bool TMC5160::checkComms(const char* label)
 
 void TMC5160::shutdown()
 {
-    // Ensure motion stops before disabling outputs (force ramp to 0).
-    forceStandstill();
     tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
     tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
     enableDriver(false);
     std::cout << "TMC5160 detenido (CS=" << cs_pin_ << ", EN=" << en_pin_ << ")\n";
 }
 
-void TMC5160::forceStandstill()
-{
-    // Lleva el generador de rampa a velocidad 0 usando la rampa (no solo HOLD) para borrar cualquier
-    // velocidad latente que quedase en el chip tras ejecuciones previas. Usa una deceleración alta
-    // temporalmente para vaciar rápido el ramp generator.
-    const uint32_t dmax_original = tmc5160_readRegister(icID_, TMC5160_DMAX);
-    const uint32_t d1_original = tmc5160_readRegister(icID_, TMC5160_D1);
-    const uint32_t amax_original = tmc5160_readRegister(icID_, TMC5160_AMAX);
-
-    tmc5160_writeRegister(icID_, TMC5160_DMAX, TMC5160_MAX_ACCELERATION);
-    tmc5160_writeRegister(icID_, TMC5160_D1, TMC5160_MAX_ACCELERATION);
-    tmc5160_writeRegister(icID_, TMC5160_AMAX, TMC5160_MAX_ACCELERATION);
-
-    const uint32_t rawStart = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
-    const int32_t velStart = (rawStart & 0x800000) ? (rawStart | 0xFF000000) : (rawStart & 0x00FFFFFF);
-    const bool wasNegative = velStart < 0;
-
-    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, wasNegative ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
-    tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
-    tmc5160_writeRegister(icID_, TMC5160_XTARGET, tmc5160_readRegister(icID_, TMC5160_XACTUAL));
-
-    bool standstillReached = false;
-    constexpr int kMaxPolls = 150; // ~300 ms
-    for (int i = 0; i < kMaxPolls; ++i) {
-        const uint32_t rampstat = tmc5160_readRegister(icID_, TMC5160_RAMPSTAT);
-        if (rampstat & TMC5160_RS_VZERO) {
-            standstillReached = true;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
-    tmc5160_writeRegister(icID_, TMC5160_DMAX, dmax_original);
-    tmc5160_writeRegister(icID_, TMC5160_D1, d1_original);
-    tmc5160_writeRegister(icID_, TMC5160_AMAX, amax_original);
-}
 
 
 // Librerías para TMC-API

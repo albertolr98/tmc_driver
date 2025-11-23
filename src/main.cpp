@@ -42,9 +42,9 @@ void runHardcodedSquare(const std::array<std::pair<const char*, TMCDriver*>, 4>&
         for (const auto& segment : pattern) {
             if (g_shouldStop.load()) break;
 
-            drivers[1].second->setSpeed(0, segment.drv2_rpm * kRpmToRadPerSec);
-            drivers[2].second->setSpeed(0, segment.drv3_rpm * kRpmToRadPerSec);
-            drivers[3].second->setSpeed(0, segment.drv4_rpm * kRpmToRadPerSec);
+            drivers[1].second->setSpeed(segment.drv2_rpm * kRpmToRadPerSec);
+            drivers[2].second->setSpeed(segment.drv3_rpm * kRpmToRadPerSec);
+            drivers[3].second->setSpeed(segment.drv4_rpm * kRpmToRadPerSec);
             std::printf("%s | v2=%.1f rad/s, v3=%.1f rad/s, v4=%.1f rad/s\n",
                         segment.description,
                         segment.drv2_rpm * kRpmToRadPerSec,
@@ -57,7 +57,7 @@ void runHardcodedSquare(const std::array<std::pair<const char*, TMCDriver*>, 4>&
                 if (elapsed >= segment.duration) break;
 
                 for (auto& [label, drv] : drivers) {
-                    const auto pos = drv->readPosition(0);
+                    const auto pos = drv->readPosition();
                     std::printf("[%s] Posición leída: %.2f\n", label, pos);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -99,33 +99,33 @@ int main()
         std::printf("[%s] Resultado comunicación: %s\n", label, ok ? "OK" : "FALLO");
     }
     for (auto& [label, drv] : drivers) {
-        const auto pos = drv->readPosition(0);
+        const auto pos = drv->readPosition();
         std::printf("[%s] Posición leída: %.2f\n", label, pos);
     }
 
     //runHardcodedSquare(drivers);
 
     for (auto& [label, drv] : drivers) {
-        drv->setSpeed(0, -2*3.14159); // 1 vuelta por segundo
+        drv->setSpeed(-2*3.14159); // 1 vuelta por segundo
     }
 
     // Esperar hasta recibir SIGINT
     while (!g_shouldStop.load()) {
         std::printf("Posiciones motores: %.2f, %.2f, %.2f, %.2f rad\n",
-                    drv1.readPosition(0),
-                    drv2.readPosition(0),
-                    drv3.readPosition(0),
-                    drv4.readPosition(0));
+                    drv1.readPosition(),
+                    drv2.readPosition(),
+                    drv3.readPosition(),
+                    drv4.readPosition());
         std::printf("Velocidades motores: %.2f, %.2f, %.2f, %.2f rad/s\n",
-                    drv1.readSpeed(0),
-                    drv2.readSpeed(0),
-                    drv3.readSpeed(0),
-                    drv4.readSpeed(0));
+                    drv1.readSpeed(),
+                    drv2.readSpeed(),
+                    drv3.readSpeed(),
+                    drv4.readSpeed());
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
     for (auto& [label, drv] : drivers) {
-        drv->setSpeed(0, 0.0f);
+        drv->setSpeed(0.0f);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         drv->shutdown();
         std::printf("[%s] Driver deshabilitado\n", label);
