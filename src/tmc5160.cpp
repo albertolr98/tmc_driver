@@ -18,41 +18,78 @@ extern "C" {
 
 namespace
 {
-constexpr double kStepsPerRev = 200.0;            // 1.8° per step
-constexpr double kMicrostepsPerStep = 256.0;      // CHOPCONF MRES=0
-constexpr double kMicrostepsPerRev = kStepsPerRev * kMicrostepsPerStep;
-constexpr double kTau = 6.28318530717958647692;   // 2 * pi
-constexpr double kMicrostepToRad = kTau / kMicrostepsPerRev;
-constexpr double kTmc5160ClockHz = 12'000'000.0;  // Datasheet fCLK
-constexpr double kVelocityTimeUnit =
-  static_cast<double>(1u << 24) / kTmc5160ClockHz;  // µsteps/s -> register factor
-// Tiempo fijo de rampa: todas las ruedas llegan al objetivo en el mismo tiempo (más suave)
-constexpr double kRampTimeSeconds = 3.0;  // sube para suavizar aceleración
-// Escala de aceleración en unidades de registro (mismo factor que VMAX^2).
-constexpr double kAccelerationTimeUnit = kVelocityTimeUnit * kVelocityTimeUnit;
-constexpr double kMinAccelerationReg = 1.0;
-constexpr double kMaxAccelerationReg = static_cast<double>(TMC5160_MAX_ACCELERATION);
+// ==========================================
+// 1. Constantes Físicas del Motor
+// ==========================================
+constexpr double kMotorStepsPerRev = 200.0;         // Motor estándar de 1.8 grados/paso
+constexpr double kMicrostepsPerStep = 256.0;        // Interpolación interna (MRES=0)
+constexpr double kTotalMicrostepsPerRev = kMotorStepsPerRev * kMicrostepsPerStep;
 
-double toMicrostepsPerSecond(double rad_per_sec)
+constexpr double kRadiansPerRev = 6.28318530717958647692; // 2 * PI
+constexpr double kRadiansPerMicrostep = kRadiansPerRev / kTotalMicrostepsPerRev;
+
+constexpr double kDriverClockFreqHz = 12'000'000.0; // Frecuencia de reloj del chip
+
+// ==========================================
+// 2. Configuración de Sincronización
+// ==========================================
+// Tiempo fijo que tardarán TODAS las ruedas en alcanzar su velocidad objetivo.
+// Al forzar un tiempo constante, garantizamos que los motores terminen
+// de acelerar al mismo tiempo, manteniendo la trayectoria recta.
+constexpr double kRampTimeSeconds = 0.5; 
+
+// ==========================================
+// 3. Factores de Conversión (Datasheet TMC5160)
+// ==========================================
+
+// Factor para convertir Velocidad (Hz) -> Registro VMAX
+// v_reg = v_hz * (2^24 / fCLK)
+constexpr double kVelocityToRegisterScale = static_cast<double>(1u << 24) / kDriverClockFreqHz;
+
+// Factor para convertir Aceleración (Hz/s) -> Registro AMAX
+// a_reg = a_hz * (2^41 / fCLK^2)
+// Se usa 1ULL<<41 para asegurar precisión en 64 bits.
+constexpr double kAccelerationToRegisterScale = static_cast<double>(1ULL << 41) / (kDriverClockFreqHz * kDriverClockFreqHz);
+
+// ==========================================
+// 4. Funciones Auxiliares de Conversión
+// ==========================================
+
+// Convierte de Radianes/segundo a Micropasos/segundo (Valor absoluto)
+double RadsPerSec_To_MicrostepsPerSec(double rad_per_sec)
 {
-    return std::fabs(rad_per_sec) / kMicrostepToRad;
+    return std::fabs(rad_per_sec) / kRadiansPerMicrostep;
 }
 
-double vactualToMicrostepsPerSecond(uint32_t raw_vactual)
+// Convierte el valor crudo del registro VACTUAL a Micropasos/segundo (con signo)
+double Vactual_To_MicrostepsPerSec(uint32_t raw_vactual)
 {
+    // VACTUAL es un valor de 24 bits en complemento a dos.
+    // Verificamos el bit 23 para extender el signo a 32 bits si es negativo.
     const int32_t vel = (raw_vactual & 0x800000) ? (raw_vactual | 0xFF000000) : (raw_vactual & 0x00FFFFFF);
-    return static_cast<double>(vel) / kVelocityTimeUnit;
+    return static_cast<double>(vel) / kVelocityToRegisterScale; 
 }
 
-uint32_t accelToRegister(double microsteps_per_second2)
+// Convierte Micropasos/segundo^2 a valor de registro de Aceleración
+uint32_t MicrostepsPerSecSq_To_AccelReg(double microsteps_per_second2)
 {
-    const double reg_value = microsteps_per_second2 * kAccelerationTimeUnit;
-    const double clamped = std::clamp(reg_value, kMinAccelerationReg, kMaxAccelerationReg);
+    const double reg_value = microsteps_per_second2 * kAccelerationToRegisterScale;
+    // Limitamos el valor para evitar desbordamientos del registro (aprox 65535)
+    // y aseguramos que sea al menos 1 para evitar divisiones por cero internas.
+    const double clamped = std::clamp(reg_value, 1.0, 65535.0);
     return static_cast<uint32_t>(std::lround(clamped));
 }
-}  // namespace
 
-// Pin activo en bajo: EN=0 → habilitado
+}  // namespace anónimo
+
+// ==========================================
+// Implementación de la Clase TMC5160
+// ==========================================
+
+TMC5160::TMC5160(unsigned int cs_gpio, unsigned int en_gpio)
+    : icID_(tmc::allocateIcID()), cs_pin_(cs_gpio), en_pin_(en_gpio) {}
+
+// Gestiona el pin físico ENABLE a través de libgpiod
 bool TMC5160::enableDriver(bool state)
 {
     gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
@@ -67,15 +104,13 @@ bool TMC5160::enableDriver(bool state)
         return false;
     }
 
-    // state=true → habilitar (nivel bajo)
+    // La lógica es inversa: Low (0) = Habilitado, High (1) = Deshabilitado
     gpiod_line_set_value(line, state ? 0 : 1);
 
     gpiod_line_release(line);
     gpiod_chip_close(chip);
     return true;
 }
-TMC5160::TMC5160(unsigned int cs_gpio, unsigned int en_gpio)
-    : icID_(tmc::allocateIcID()), cs_pin_(cs_gpio), en_pin_(en_gpio) {}
 
 bool TMC5160::init()
 {
@@ -84,31 +119,30 @@ bool TMC5160::init()
         return false;
     }
     tmc::registerCSPin(icID_, cs_pin_);
-    // Inicializar la caché de la TMC-API y aplicar la configuración por defecto
-    // (reset, limpieza de flags y parámetros de rampa/motor) igual que la
-    // inicialización previa que compartiste.
+    
+    // Inicializa la estructura de caché de la librería TMC-API
     tmc5160_initCache();
 
-    // Reset del driver y limpieza de flags de estado
-    tmc5160_writeRegister(icID_, TMC5160_GCONF, 0x00000000); // Reset a valores por defecto
-    tmc5160_writeRegister(icID_, TMC5160_GSTAT, 0x00000007); // Limpiar flags de estado
+    // Reset de registros globales y limpieza de errores (GSTAT)
+    tmc5160_writeRegister(icID_, TMC5160_GCONF, 0x00000000); 
+    tmc5160_writeRegister(icID_, TMC5160_GSTAT, 0x00000007); 
 
-    // Reconfigurar registros principales para un motor NEMA17 de 2.5A RMS
-    tmc5160_writeRegister(icID_, TMC5160_GCONF, 0x00000004);           // StealthChop + interpolation
-    tmc5160_writeRegister(icID_, TMC5160_CHOPCONF, 0x000100C3);        // SpreadCycle base (16 µsteps) for suavidad
-    tmc5160_writeRegister(icID_, TMC5160_IHOLD_IRUN, 0x00061004);      // IHOLD=4 (~0.44A), IRUN=16 (~1.6A), IHOLDDELAY=6
-    tmc5160_writeRegister(icID_, TMC5160_TPOWERDOWN, 0x0000000A);      // 10 * 2^18 clock cycles
-    tmc5160_writeRegister(icID_, TMC5160_TPWMTHRS, 0x000001F4);        // TPWM_THRS=500
-    tmc5160_writeRegister(icID_, TMC5160_VSTART, 0); // VSTART=0 para arrancar siempre desde reposo
-    tmc5160_writeRegister(icID_, TMC5160_A1, 500); // A1=500
-    tmc5160_writeRegister(icID_, TMC5160_V1, 5000); // V1=5000
-    tmc5160_writeRegister(icID_, TMC5160_AMAX, 500); // AMAX=500
-    tmc5160_writeRegister(icID_, TMC5160_DMAX, 700); // DMAX=700
-    tmc5160_writeRegister(icID_, TMC5160_D1, 1400); // D1=1400
-    tmc5160_writeRegister(icID_, TMC5160_VSTOP, 10); // VSTOP=10
-    tmc5160_writeRegister(icID_, TMC5160_XACTUAL, 0); // XACTUAL=0
+    // Configuración de Chopper (StealthChop + SpreadCycle) y Corrientes
+    tmc5160_writeRegister(icID_, TMC5160_GCONF, 0x00000004);           
+    tmc5160_writeRegister(icID_, TMC5160_CHOPCONF, 0x000100C3);        
+    tmc5160_writeRegister(icID_, TMC5160_IHOLD_IRUN, 0x00061004);      
+    tmc5160_writeRegister(icID_, TMC5160_TPOWERDOWN, 0x0000000A);      
+    tmc5160_writeRegister(icID_, TMC5160_TPWMTHRS, 0x000001F4);        
+    
+    // Valores iniciales seguros para los registros de rampa.
+    // Estos se sobrescribirán dinámicamente en setSpeed.
+    tmc5160_writeRegister(icID_, TMC5160_VSTART, 0); 
+    tmc5160_writeRegister(icID_, TMC5160_A1, 0); 
+    tmc5160_writeRegister(icID_, TMC5160_V1, 0); 
+    tmc5160_writeRegister(icID_, TMC5160_VSTOP, 10); // Umbral de parada segura
+    tmc5160_writeRegister(icID_, TMC5160_XACTUAL, 0); 
 
-    // Detén cualquier movimiento previo y deja VMAX a 0 antes de aceptar comandos.
+    // Asegurar que el motor arranca detenido
     tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
     tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
 
@@ -116,92 +150,86 @@ bool TMC5160::init()
     return true;
 }
 
+// Lógica principal de movimiento sincronizado por tiempo
 bool TMC5160::setSpeed(float rad_per_sec)
 {
+    // 1. Filtrado de ruido en zona muerta
+    if (std::fabs(rad_per_sec) < 1e-3f) {
+        rad_per_sec = 0.0f;
+    }
 
-    // 1. Determinamos la dirección y la magnitud
-    // Nota: Mantenemos siempre el modo velocidad (VELPOS o VELNEG).
-    // NUNCA usamos HOLD (3) para parar, porque HOLD mantiene la velocidad actual.
     bool negative_dir = rad_per_sec < 0.0f;
 
-    const uint32_t raw_vactual = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
-    const double current_microsteps_per_second_signed = vactualToMicrostepsPerSecond(raw_vactual);
-    const double current_microsteps_per_second_abs = std::fabs(current_microsteps_per_second_signed);
-    const bool currentlyNegative = current_microsteps_per_second_signed < 0.0;
+    // 2. Lectura de estado actual
+    // Necesitamos saber a qué velocidad vamos realmente para calcular cuánto falta.
+    uint32_t raw_vactual = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
+    double current_steps_s = Vactual_To_MicrostepsPerSec(raw_vactual);
+    
+    // 3. Cálculo de objetivos
+    double target_steps_s = RadsPerSec_To_MicrostepsPerSec(std::fabs(rad_per_sec));
+    
+    // Asignamos signo al target para poder restar correctamente
+    if (negative_dir) target_steps_s = -target_steps_s; 
 
-    // 2. Caso de parada (velocidad cercana a 0)
-    if (std::fabs(rad_per_sec) < 1e-3f) {
-        // Si ya estamos parados, no hacemos nada
-        if (current_microsteps_per_second_abs < 1e-6) return true;
+    // 4. Cálculo de aceleración dinámica
+    // Fórmula física: a = (v_final - v_inicial) / tiempo
+    double delta_v = std::fabs(target_steps_s - current_steps_s);
 
-        // Rampa de frenado calculada para llegar a 0 en kRampTimeSeconds
-        const uint32_t decel_reg = accelToRegister(current_microsteps_per_second_abs / kRampTimeSeconds);
+    // Si la diferencia es muy pequeña, usamos una aceleración mínima por defecto.
+    // De lo contrario, dividimos por la constante de tiempo (1.0s).
+    double accel_steps_s2 = (delta_v < 1.0) ? 1000.0 : (delta_v / kRampTimeSeconds);
 
-        tmc5160_writeRegister(icID_, TMC5160_AMAX, decel_reg);
-        tmc5160_writeRegister(icID_, TMC5160_DMAX, decel_reg);
+    // 5. Configuración de registros de rampa
+    uint32_t amax_reg = MicrostepsPerSecSq_To_AccelReg(accel_steps_s2);
+    
+    // Configuramos una rampa LINEAL (Trapezoidal).
+    // Al poner V1 = 0 y A1 = AMAX, deshabilitamos el perfil de 6 puntos (curva S).
+    // Esto es necesario para que la relación Tiempo = Vel / Acel se cumpla estrictamente.
+    tmc5160_writeRegister(icID_, TMC5160_A1, amax_reg);
+    tmc5160_writeRegister(icID_, TMC5160_V1, 0);
+    tmc5160_writeRegister(icID_, TMC5160_AMAX, amax_reg);
+    tmc5160_writeRegister(icID_, TMC5160_DMAX, amax_reg);
+    tmc5160_writeRegister(icID_, TMC5160_D1, amax_reg);
+    
+    // 6. Ejecución del movimiento
+    double abs_target = std::fabs(target_steps_s);
 
-        tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, currentlyNegative ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
+    if (abs_target < 1e-3) {
+        // Caso de PARADA:
+        // Ponemos VMAX a 0, pero mantenemos el modo de velocidad (VELPOS/VELNEG)
+        // para que el driver use la rampa de deceleración configurada (DMAX).
         tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
         
-        return true;
+        // Mantenemos el signo de la velocidad actual para frenar en la dirección correcta.
+        bool currently_neg = (current_steps_s < 0);
+        tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, currently_neg ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
+
+    } else {
+        // Caso de MARCHA:
+        int32_t vmax_reg = static_cast<int32_t>(std::lround(abs_target * kVelocityToRegisterScale));
+        
+        // Clamp de seguridad contra valores fuera de rango del datasheet
+        if (vmax_reg > (int32_t)TMC5160_MAX_VELOCITY) vmax_reg = TMC5160_MAX_VELOCITY;
+
+        // Establecemos el modo según la dirección deseada
+        tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, negative_dir ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
+        tmc5160_writeRegister(icID_, TMC5160_VMAX, vmax_reg);
     }
 
-    // 2b. Si la orden invierte el sentido y aún vamos rápido, primero frena suavemente a 0.
-    if ((currentlyNegative != negative_dir) && (current_microsteps_per_second_abs > 1e-3)) {
-        const uint32_t decel_reg = accelToRegister(current_microsteps_per_second_abs / kRampTimeSeconds);
-        tmc5160_writeRegister(icID_, TMC5160_AMAX, decel_reg);
-        tmc5160_writeRegister(icID_, TMC5160_DMAX, decel_reg);
-        tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, currentlyNegative ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS);
-        tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
-        return true;  // vuelve a llamar a setSpeed() en el siguiente ciclo con la nueva dirección
-    }
-
-    // 3. Caso de movimiento normal
-    const double microsteps_per_second = toMicrostepsPerSecond(rad_per_sec);
-    const uint32_t accel_reg = accelToRegister(microsteps_per_second / kRampTimeSeconds);
-
-    // Misma aceleración/dec para las tres ruedas → misma rampa temporal
-    tmc5160_writeRegister(icID_, TMC5160_AMAX, accel_reg);
-    tmc5160_writeRegister(icID_, TMC5160_DMAX, accel_reg);
-    // Segmento suave inicial: V1 a un tercio del objetivo y A1/D1 a ~1/3 de AMAX
-    const uint32_t a1_reg = std::max<uint32_t>(1u, accel_reg / 3u);
-    const uint32_t d1_reg = std::max<uint32_t>(1u, accel_reg / 3u);
-
-    double vmax_d = microsteps_per_second * kVelocityTimeUnit;
-    
-    if (vmax_d > static_cast<double>(TMC5160_MAX_VELOCITY)) 
-        vmax_d = static_cast<double>(TMC5160_MAX_VELOCITY);
-
-    int32_t vmax = static_cast<int32_t>(std::lround(vmax_d));
-    const uint32_t v1_reg = static_cast<uint32_t>(std::max(1.0, vmax_d / 3.0));
-
-    // CORRECCIÓN: incluso si vmax es 0 por redondeo, forzamos VELPOS/VELNEG (no HOLD).
-    uint8_t rampMode = negative_dir ? TMC5160_MODE_VELNEG : TMC5160_MODE_VELPOS;
-
-    tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, rampMode);
-    tmc5160_writeRegister(icID_, TMC5160_VMAX, vmax);
-    tmc5160_writeRegister(icID_, TMC5160_V1, v1_reg);
-    tmc5160_writeRegister(icID_, TMC5160_A1, a1_reg);
-    tmc5160_writeRegister(icID_, TMC5160_D1, d1_reg);
     return true;
 }
 
 float TMC5160::readPosition()
 {
     const int32_t pos = tmc5160_readRegister(icID_, TMC5160_XACTUAL);
-    const double radians = static_cast<double>(pos) * kMicrostepToRad;
-    return static_cast<float>(radians);
+    return static_cast<float>(static_cast<double>(pos) * kRadiansPerMicrostep);
 }
 
 float TMC5160::readSpeed()
 {
-    // VACTUAL is a 24-bit signed value in the lower bits of a 32-bit register
     const uint32_t raw = tmc5160_readRegister(icID_, TMC5160_VACTUAL);
-    // Sign-extend from 24-bit to 32-bit
-    const int32_t vel = (raw & 0x800000) ? (raw | 0xFF000000) : (raw & 0x00FFFFFF);
-    const double microsteps_per_second = static_cast<double>(vel) / kVelocityTimeUnit;
-    const double rad_per_second = microsteps_per_second * kMicrostepToRad;
-    return static_cast<float>(rad_per_second);
+    double microsteps_sec = Vactual_To_MicrostepsPerSec(raw);
+    return static_cast<float>(microsteps_sec * kRadiansPerMicrostep);
 }
 
 bool TMC5160::checkComms(const char* label)
@@ -211,8 +239,9 @@ bool TMC5160::checkComms(const char* label)
     const uint32_t inpOut = tmc5160_readRegister(icID_, TMC5160_INP_OUT);
     const uint32_t version = (inpOut & TMC5160_VERSION_MASK) >> TMC5160_VERSION_SHIFT;
 
+    // Test de lectura/escritura en registro VMAX
     const uint32_t originalVmax = tmc5160_readRegister(icID_, TMC5160_VMAX);
-    const uint32_t testVmax = 0x000A000; // pequeño valor de prueba dentro del rango
+    const uint32_t testVmax = 0x000A000; 
     tmc5160_writeRegister(icID_, TMC5160_VMAX, testVmax);
     const uint32_t echoed = tmc5160_readRegister(icID_, TMC5160_VMAX);
     tmc5160_writeRegister(icID_, TMC5160_VMAX, originalVmax);
@@ -222,32 +251,28 @@ bool TMC5160::checkComms(const char* label)
 
     std::printf("[%s] GCONF=0x%08X | INP_OUT=0x%08X (version 0x%02X) | VMAX echo %s\n",
                 tag, gconf, inpOut, version, vmaxEchoOk ? "OK" : "FAIL");
-    if (!versionOk) {
-        std::printf("  -> Firma esperada 0x21/0x30, recibido 0x%02X\n", version);
-    }
-
+    
     return versionOk && vmaxEchoOk;
 }
 
 void TMC5160::shutdown()
 {
+    // Detiene el motor inmediatamente y deshabilita la etapa de potencia
     tmc5160_writeRegister(icID_, TMC5160_RAMPMODE, TMC5160_MODE_HOLD);
     tmc5160_writeRegister(icID_, TMC5160_VMAX, 0);
     enableDriver(false);
     std::cout << "TMC5160 detenido (CS=" << cs_pin_ << ", EN=" << en_pin_ << ")\n";
 }
 
-
-
-// Librerías para TMC-API
+// ==========================================
+// Puentes (Trampolines) para la TMC-API en C
+// ==========================================
 extern "C" void tmc5160_readWriteSPI(uint16_t icID, uint8_t* data, size_t length)
 {
     unsigned int csPin = 0;
-    if (!tmc::csPinFor(icID, csPin)) {
-        std::cerr << "CS no registrado para icID=" << icID << "\n";
-        return;
+    if (tmc::csPinFor(icID, csPin)) {
+        SPIBus::transfer(data, length, csPin);
     }
-    SPIBus::transfer(data, length, csPin);
 }
 
 extern "C" TMC5160BusType tmc5160_getBusType(uint16_t)
@@ -255,6 +280,6 @@ extern "C" TMC5160BusType tmc5160_getBusType(uint16_t)
     return TMC5160BusType::IC_BUS_SPI;
 }
 
-// Dummy UART, no implementado
-extern "C" bool tmc5160_readWriteUART(uint16_t icID, uint8_t *data, size_t writeLength, size_t readLength) {return false;}
-extern "C" uint8_t tmc5160_getNodeAddress(uint16_t icID) { return 0; }
+// Funciones UART no utilizadas en modo SPI
+extern "C" bool tmc5160_readWriteUART(uint16_t, uint8_t*, size_t, size_t) { return false; }
+extern "C" uint8_t tmc5160_getNodeAddress(uint16_t) { return 0; }
