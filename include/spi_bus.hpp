@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <mutex>
 #include <gpiod.h>
+#include <unordered_map>
 
 class SPIBus {
 public:
@@ -15,4 +16,7 @@ private:
     static int fd_;
     static std::mutex mtx_;
     static bool logEnabled_;
+    
+    static gpiod_chip* gpio_chip_;
+    static std::unordered_map<unsigned int, gpiod_line*> cs_lines_;
 };
